@@ -59,7 +59,7 @@ pub struct UserPassAuthCredential {
 }
 
 impl UserPassAuthCredential {
-    pub fn new<T: AsRef<str>>(username: T, password: T) -> Self {
+    pub fn new<T: AsRef<str>, U: AsRef<str>>(username: T, password: U) -> Self {
         Self {
             username: username.as_ref().into(),
             password: password.as_ref().into(),
