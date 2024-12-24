@@ -3,7 +3,13 @@ use futures_util::{stream, StreamExt};
 use ini::Ini;
 use parking_lot::RwLock;
 use std::{
-    collections::HashSet, io, net::SocketAddr, net::ToSocketAddrs, path::PathBuf, sync::Arc,
+    collections::HashSet,
+    io,
+    net::SocketAddr,
+    net::ToSocketAddrs,
+    path::PathBuf,
+    process::{Command, Stdio},
+    sync::Arc,
     time::Duration,
 };
 use tokio::net::{TcpListener, TcpStream};
@@ -239,6 +245,30 @@ struct ServerListConfig {
     allow_direct: bool,
 }
 
+fn evaluate_shell_command(cmd: &str) -> anyhow::Result<String> {
+    #[cfg(not(target_os = "windows"))]
+    let proc_output = Command::new("sh")
+        .stderr(Stdio::inherit())
+        .stdin(Stdio::null())
+        .arg("-c")
+        .arg(cmd)
+        .output()?;
+
+    #[cfg(target_os = "windows")]
+    let proc_output = Command::new("cmd")
+        .stderr(Stdio::inherit())
+        .stdin(Stdio::null())
+        .arg("/C")
+        .arg(cmd)
+        .output()?;
+
+    if !proc_output.status.success() {
+        bail!("password shell command failed");
+    }
+    let stdout = String::from_utf8(proc_output.stdout)?;
+    Ok(stdout.trim_end().into())
+}
+
 impl ServerListConfig {
     fn new(args: &CliArgs) -> Self {
         let default_test_dns = args.test_dns;
@@ -356,7 +386,19 @@ impl ServerListConfig {
                     .context("not a boolean value")?
                     .unwrap_or(false);
                 let username = props.get("socks username").unwrap_or("");
-                let password = props.get("socks password").unwrap_or("");
+
+                let password = match (
+                    props.get("socks password"),
+                    props.get("socks password eval"),
+                ) {
+                    (None, None) => "".into(),
+                    (Some(pass), None) => pass.into(),
+                    (None, Some(cmd)) => evaluate_shell_command(cmd)?,
+                    (_, _) => {
+                        bail!("both \"socks password\" and \"socks password eval\" fields defined")
+                    }
+                };
+
                 match (username.len(), password.len()) {
                     (0, 0) => ProxyProto::socks5(fake_hs),
                     (0, _) | (_, 0) => bail!("socks username/password is empty"),
@@ -374,14 +416,24 @@ impl ServerListConfig {
                     .parse()
                     .context("not a boolean value")?
                     .unwrap_or(false);
-                let credential = match (props.get("http username"), props.get("http password")) {
+
+                let password = match (props.get("http password"), props.get("http password eval")) {
+                    (None, None) => None,
+                    (Some(pass), None) => Some(pass.into()),
+                    (None, Some(cmd)) => Some(evaluate_shell_command(cmd)?),
+                    (_, _) => {
+                        bail!("both \"http password\" and \"http password eval\" fields defined")
+                    }
+                };
+
+                let credential = match (props.get("http username"), password) {
                     (None, None) => None,
                     (Some(user), _) if user.contains(':') => {
                         bail!("semicolon (:) in http username")
                     }
                     (user, pass) => Some(UserPassAuthCredential::new(
                         user.unwrap_or(""),
-                        pass.unwrap_or(""),
+                        pass.unwrap_or("".into()),
                     )),
                 };
                 ProxyProto::http(cwp, credential)
